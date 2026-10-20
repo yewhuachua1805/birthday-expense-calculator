@@ -259,4 +259,32 @@ $('#expenses').addEventListener('click', async e => {
   }
 });
 
+// ---------- Delete account / wipe party data ----------
+
+$('#delete-data-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#delete-data-error').textContent = '';
+  const target = e.submitter?.dataset.target || '/api/me';
+  const question = target === '/api/party'
+    ? 'Delete EVERY member’s account and ALL expenses? Everyone will need to sign up again.'
+    : 'Delete your account and all the expenses you added?';
+  if (!confirm(question)) return;
+  try {
+    await api(target, { method: 'DELETE', body: Object.fromEntries(new FormData(e.target)) });
+    e.target.reset();
+    me = null;
+    showAuth();
+  } catch (err) {
+    if (err.status === 401) return showAuth();
+    $('#delete-data-error').textContent = err.message;
+  }
+});
+
+// Only the organiser sees the wipe button. Checked whenever the main view is shown.
+new MutationObserver(() => {
+  const organiser = Boolean(me?.isOrganiser) && !$('#app-view').hidden;
+  $('#wipe-party-btn').hidden = !organiser;
+  $('#wipe-party-note').hidden = !organiser;
+}).observe($('#app-view'), { attributes: true, attributeFilter: ['hidden'] });
+
 boot();
