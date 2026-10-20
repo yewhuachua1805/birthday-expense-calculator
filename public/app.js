@@ -97,18 +97,28 @@ function renderInvite(s, invite) {
 
 function renderSummary(s) {
   $('#stat-total').textContent = money(s.totalCents);
-  $('#stat-share').textContent = money(Math.round(s.perPersonCents));
+  // Matches the Share column: some people pay 1¢ more when the total doesn't divide evenly.
+  $('#stat-share').textContent = s.shareRemainderCents
+    ? `${money(s.perPersonCents)}–${money(s.perPersonCents + 1)}`
+    : money(s.perPersonCents);
   $('#stat-members').textContent = `${s.memberCount} / ${s.maxMembers}`;
   $('#split-note').textContent = s.memberCount < s.maxMembers
     ? `Costs are split among the ${s.memberCount} people who have signed up so far. Shares will change as more people join.`
     : `Costs are split equally among all ${s.memberCount} family members.`;
+
+  // People are matched by id; repeated names are numbered ("Mum (1)", "Mum (2)") in table order.
+  const personName = id => {
+    const m = s.members.find(x => x.id === id);
+    const same = s.members.filter(x => x.name.toLowerCase() === m.name.toLowerCase());
+    return m.name + (same.length > 1 ? ` (${same.indexOf(m) + 1})` : '') + (id === me.id ? ' (you)' : '');
+  };
 
   $('#members').innerHTML = s.members.map(m => {
     const cls = m.balanceCents > 0 ? 'pos' : m.balanceCents < 0 ? 'neg' : '';
     const label = m.balanceCents > 0 ? `gets back ${money(m.balanceCents)}`
                 : m.balanceCents < 0 ? `owes ${money(-m.balanceCents)}` : 'settled';
     return `<tr class="${m.id === me.id ? 'me' : ''}">
-      <td>${escapeHtml(m.name)}${m.id === me.id ? ' (you)' : ''}</td>
+      <td>${escapeHtml(personName(m.id))}</td>
       <td class="num">${money(m.paidCents)}</td>
       <td class="num">${money(m.shareCents)}</td>
       <td class="num ${cls}">${label}</td>
@@ -117,7 +127,7 @@ function renderSummary(s) {
 
   $('#settlements').innerHTML = s.settlements.length
     ? s.settlements.map(t =>
-        `<li><strong>${escapeHtml(t.from)}</strong> pays <strong>${escapeHtml(t.to)}</strong> <span class="amt">${money(t.amountCents)}</span></li>`
+        `<li><strong>${escapeHtml(personName(t.fromId))}</strong> pays <strong>${escapeHtml(personName(t.toId))}</strong> <span class="amt">${money(t.amountCents)}</span></li>`
       ).join('')
     : `<li class="muted">${s.totalCents ? 'Everyone is even 🎉' : 'Nothing to settle yet.'}</li>`;
 }
@@ -163,6 +173,9 @@ document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', (
 for (const [formId, endpoint] of [['#login-form', '/api/login'], ['#register-form', '/api/register']]) {
   $(formId).addEventListener('submit', async e => {
     e.preventDefault();
+    const button = e.target.querySelector('[type=submit]');
+    if (button.disabled) return; // a request is already in flight
+    button.disabled = true;
     $('#auth-error').textContent = '';
     try {
       await api(endpoint, { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
@@ -171,6 +184,8 @@ for (const [formId, endpoint] of [['#login-form', '/api/login'], ['#register-for
       showApp();
     } catch (err) {
       $('#auth-error').textContent = err.message;
+    } finally {
+      button.disabled = false;
     }
   });
 }
@@ -192,6 +207,9 @@ $('#copy-invite').addEventListener('click', async () => {
 
 $('#expense-form').addEventListener('submit', async e => {
   e.preventDefault();
+  const button = $('#form-submit');
+  if (button.disabled) return; // a save is already in flight; don't create a duplicate expense
+  button.disabled = true;
   $('#form-error').textContent = '';
   const body = Object.fromEntries(new FormData(e.target));
   try {
@@ -202,6 +220,8 @@ $('#expense-form').addEventListener('submit', async e => {
   } catch (err) {
     if (err.status === 401) return showAuth();
     $('#form-error').textContent = err.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -225,13 +245,16 @@ $('#expenses').addEventListener('click', async e => {
     form.description.focus();
   }
 
-  if (deleteId && confirm('Delete this expense?')) {
+  if (deleteId && !e.target.disabled && confirm('Delete this expense?')) {
+    e.target.disabled = true;
     try {
       await api(`/api/expenses/${deleteId}`, { method: 'DELETE' });
       if (editingId === Number(deleteId)) resetForm();
       await refresh();
     } catch (err) {
       alert(err.message);
+    } finally {
+      e.target.disabled = false;
     }
   }
 });

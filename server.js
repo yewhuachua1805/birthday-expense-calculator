@@ -196,12 +196,20 @@ function currentMember(req) {
 
 // ---------- Validation ----------
 
-// Accepts "100", "100.5", "$1,250.00" → integer cents.
+// Accepts "100", "100.5", "$1,250.00" → integer cents. Commas are only allowed as thousands separators,
+// so a decimal comma like "1,00" is rejected rather than silently read as $100.
 function parseAmount(value) {
-  const text = String(value ?? '').trim().replace(/^\$/, '').replace(/,/g, '');
-  if (!/^\d+(\.\d{1,2})?$/.test(text)) return null;
-  const cents = Math.round(parseFloat(text) * 100);
+  const text = String(value ?? '').trim().replace(/^\$/, '');
+  if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(text)) return null;
+  const cents = Math.round(parseFloat(text.replace(/,/g, '')) * 100);
   return cents > 0 && cents <= 100_000_000 ? cents : null;
+}
+
+// True only for dates that exist on the calendar, e.g. rejects 2026-13-45 and 2026-02-31.
+function isValidDate(text) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const date = new Date(text + 'T00:00:00Z');
+  return !isNaN(date) && date.toISOString().slice(0, 10) === text;
 }
 
 function parseExpense(body) {
@@ -210,7 +218,7 @@ function parseExpense(body) {
   const spentOn = String(body.spentOn ?? '').trim();
   if (!description || description.length > 100) return { error: 'Description is required (max 100 characters).' };
   if (amountCents === null) return { error: 'Enter a valid amount, e.g. 100 or 49.99.' };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(spentOn)) return { error: 'Enter a valid date.' };
+  if (!isValidDate(spentOn)) return { error: 'Enter a valid date.' };
   return { description, amountCents, spentOn };
 }
 
@@ -221,7 +229,7 @@ function buildSummary() {
   const members = db.prepare(`
     SELECT m.id, m.name, COALESCE(SUM(e.amount_cents), 0) AS paid
     FROM members m LEFT JOIN expenses e ON e.member_id = m.id
-    GROUP BY m.id ORDER BY m.name COLLATE NOCASE
+    GROUP BY m.id ORDER BY m.name COLLATE NOCASE, m.id
   `).all();
 
   const total = members.reduce((sum, m) => sum + m.paid, 0);
@@ -235,30 +243,75 @@ function buildSummary() {
     m.balance = m.paid - m.share; // positive = is owed money, negative = owes money
   });
 
-  // Greedy matching of biggest debtor to biggest creditor → minimal number of payments.
-  const debtors = members.filter(m => m.balance < 0).map(m => ({ name: m.name, left: -m.balance }))
-    .sort((a, b) => b.left - a.left);
-  const creditors = members.filter(m => m.balance > 0).map(m => ({ name: m.name, left: m.balance }))
-    .sort((a, b) => b.left - a.left);
+  return {
+    totalCents: total,
+    memberCount: count,
+    maxMembers: MAX_MEMBERS,
+    // Whole-cent base share; the first `shareRemainderCents` members (as listed) pay 1¢ more.
+    perPersonCents: baseShare,
+    shareRemainderCents: remainder,
+    members: members.map(({ id, name, paid, share, balance }) =>
+      ({ id, name, paidCents: paid, shareCents: share, balanceCents: balance })),
+    settlements: settleUp(members),
+  };
+}
+
+// Fewest payments that even everyone out. A group of k people whose balances sum to zero can settle
+// among themselves in k − 1 payments, so the minimum is (people with a balance) minus the most
+// zero-sum groups they can be split into. With at most MAX_MEMBERS people, trying every subset is cheap.
+function settleUp(members) {
+  const people = members.filter(m => m.balance !== 0);
+  const full = (1 << people.length) - 1;
+  const sum = new Array(full + 1).fill(0);
+  const groups = new Array(full + 1).fill(0); // most zero-sum groups when adding people in the best order
+  const last = new Array(full + 1).fill(-1);  // who was added last in that order
+  for (let mask = 1; mask <= full; mask++) {
+    for (let i = 0; i < people.length; i++) {
+      const bit = 1 << i;
+      if (!(mask & bit)) continue;
+      sum[mask] = sum[mask ^ bit] + people[i].balance;
+      if (last[mask] === -1 || groups[mask ^ bit] > groups[mask ^ (1 << last[mask])]) last[mask] = i;
+    }
+    groups[mask] = groups[mask ^ (1 << last[mask])] + (sum[mask] === 0 ? 1 : 0);
+  }
+
+  // Recover that order, then cut it wherever the running total returns to zero.
+  const order = [];
+  for (let mask = full; mask; mask ^= 1 << last[mask]) order.unshift(people[last[mask]]);
+  const settlements = [];
+  let group = [];
+  let running = 0;
+  for (const person of order) {
+    group.push(person);
+    running += person.balance;
+    if (running === 0) {
+      settlements.push(...settleGroup(group));
+      group = [];
+    }
+  }
+  return settlements;
+}
+
+// Biggest debtor pays biggest creditor. Each payment clears at least one person and the last clears
+// two, so a zero-sum group of k people needs at most k − 1 payments.
+function settleGroup(group) {
+  const byLeft = (a, b) => b.left - a.left || a.id - b.id;
+  const debtors = group.filter(m => m.balance < 0).map(m => ({ id: m.id, name: m.name, left: -m.balance })).sort(byLeft);
+  const creditors = group.filter(m => m.balance > 0).map(m => ({ id: m.id, name: m.name, left: m.balance })).sort(byLeft);
   const settlements = [];
   for (let d = 0, c = 0; d < debtors.length && c < creditors.length;) {
     const amount = Math.min(debtors[d].left, creditors[c].left);
-    settlements.push({ from: debtors[d].name, to: creditors[c].name, amountCents: amount });
+    settlements.push({
+      fromId: debtors[d].id, from: debtors[d].name,
+      toId: creditors[c].id, to: creditors[c].name,
+      amountCents: amount,
+    });
     debtors[d].left -= amount;
     creditors[c].left -= amount;
     if (debtors[d].left === 0) d++;
     if (creditors[c].left === 0) c++;
   }
-
-  return {
-    totalCents: total,
-    memberCount: count,
-    maxMembers: MAX_MEMBERS,
-    perPersonCents: count ? total / count : 0,
-    members: members.map(({ id, name, paid, share, balance }) =>
-      ({ id, name, paidCents: paid, shareCents: share, balanceCents: balance })),
-    settlements,
-  };
+  return settlements;
 }
 
 // ---------- HTTP plumbing ----------
