@@ -6,12 +6,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { promisify } = require('node:util');
 const { DatabaseSync } = require('node:sqlite');
 
+const scrypt = promisify(crypto.scrypt);
+
 const PORT = Number(process.env.PORT) || 3000;
-const SIGNUP_CODE = process.env.SIGNUP_CODE || 'birthdayYH';
+// Only this computer can connect by default. Set HOST=0.0.0.0 to let phones on the same Wi-Fi in (plain HTTP).
+const HOST = process.env.HOST || '127.0.0.1';
+// Set TRUST_PROXY=1 when running behind an HTTPS reverse proxy (Render, Railway, Fly.io…) so
+// X-Forwarded-For / X-Forwarded-Proto are used for rate limiting and the Secure cookie flag.
+const TRUST_PROXY = ['1', 'true', 'yes'].includes(String(process.env.TRUST_PROXY).toLowerCase());
 const MAX_MEMBERS = 10;
 const SESSION_DAYS = 30;
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_BODY_BYTES = 10_000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // ---------- Database ----------
@@ -54,36 +63,121 @@ db.exec(`
     spent_on     TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `);
-db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+
+const purgeExpiredSessions = () => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+purgeExpiredSessions();
+
+// The sign-up code comes from SIGNUP_CODE, or is generated randomly on first run and kept in party.db.
+let signupCodeIsNew = false;
+const SIGNUP_CODE = process.env.SIGNUP_CODE?.trim() || (() => {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'signup_code'").get();
+  if (row) return row.value;
+  const code = crypto.randomBytes(5).toString('hex');
+  db.prepare("INSERT INTO settings (key, value) VALUES ('signup_code', ?)").run(code);
+  signupCodeIsNew = true;
+  return code;
+})();
+// `node server.js --show-code` prints the sign-up code and exits, for the organiser who missed it.
+if (process.argv.includes('--show-code')) {
+  console.log(SIGNUP_CODE);
+  process.exit(0);
+}
 
 // Address other devices on the same Wi-Fi can use to reach this computer, e.g. http://192.168.1.20:3000
-const lanAddresses = Object.values(os.networkInterfaces()).flat()
+// Only offered when the server actually listens on the network (HOST=0.0.0.0).
+const isLoopbackHost = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
+const lanAddresses = isLoopbackHost ? [] : Object.values(os.networkInterfaces()).flat()
   .filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address);
 const lanAddress = lanAddresses.find(a => a.startsWith('192.168.')) || lanAddresses[0];
 const LAN_URL = lanAddress ? `http://${lanAddress}:${PORT}` : null;
 
 // ---------- Auth helpers ----------
 
-function hashPassword(password) {
+async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const hash = (await scrypt(password, salt, 64)).toString('hex');
   return `${salt}:${hash}`;
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
   const [salt, hash] = stored.split(':');
-  const candidate = crypto.scryptSync(password, salt, 64);
+  const candidate = await scrypt(password, salt, 64);
   return crypto.timingSafeEqual(candidate, Buffer.from(hash, 'hex'));
 }
 
-function createSession(res, memberId) {
+// Checked when the username doesn't exist, so a login takes the same time either way.
+const DUMMY_HASH = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
+
+function safeEqual(a, b) {
+  const digest = s => crypto.createHash('sha256').update(String(s)).digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
+}
+
+function isHttps(req) {
+  if (req.socket.encrypted) return true;
+  return TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+
+function clientIp(req) {
+  // The last X-Forwarded-For entry is the one added by our own proxy; earlier ones can be spoofed.
+  const forwarded = TRUST_PROXY && req.headers['x-forwarded-for'];
+  return forwarded ? forwarded.split(',').pop().trim() : req.socket.remoteAddress;
+}
+
+function setSessionCookie(req, res, value, maxAge) {
+  const secure = isHttps(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `sid=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`);
+}
+
+function createSession(req, res, memberId) {
   const token = crypto.randomBytes(32).toString('hex');
   const maxAge = SESSION_DAYS * 24 * 60 * 60;
   db.prepare('INSERT INTO sessions (token, member_id, expires_at) VALUES (?, ?, ?)')
     .run(token, memberId, Date.now() + maxAge * 1000);
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}`);
+  setSessionCookie(req, res, token, maxAge);
 }
+
+// ---------- Rate limiting ----------
+
+// Failed attempts per key ("ip:…", "user:…", "code:…") within a 15-minute window. In memory only.
+const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILURES = { ip: 20, user: 5, code: 10 };
+const failures = new Map();
+
+function retryAfterSeconds(...keys) {
+  const now = Date.now();
+  const waits = keys.map(key => {
+    const f = failures.get(key);
+    return f && f.resetAt > now && f.count >= MAX_FAILURES[key.split(':')[0]] ? f.resetAt - now : 0;
+  });
+  return Math.ceil(Math.max(...waits) / 1000);
+}
+
+function recordFailure(...keys) {
+  const now = Date.now();
+  for (const key of keys) {
+    const f = failures.get(key);
+    if (f && f.resetAt > now) f.count++;
+    else failures.set(key, { count: 1, resetAt: now + ATTEMPT_WINDOW_MS });
+  }
+}
+
+function tooManyAttempts(res, seconds) {
+  res.setHeader('Retry-After', String(seconds));
+  return sendJson(res, 429, { error: `Too many attempts. Try again in ${Math.ceil(seconds / 60)} minute(s).` });
+}
+
+// Housekeeping: forget old rate-limit entries and purge expired sessions.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, f] of failures) if (f.resetAt <= now) failures.delete(key);
+  purgeExpiredSessions();
+}, 10 * 60 * 1000).unref();
 
 function getCookie(req, name) {
   const match = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
@@ -174,20 +268,34 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+// Resolves to a plain JSON object. Stops reading as soon as the body passes MAX_BODY_BYTES.
 function readJson(req) {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const tooLarge = () => reject(Object.assign(new Error('Request too large'), { status: 413 }));
+    const invalid = () => reject(Object.assign(new Error('Invalid JSON.'), { status: 400 }));
+    if (Number(req.headers['content-length']) > MAX_BODY_BYTES) return tooLarge();
+    const chunks = [];
+    let size = 0;
     req.on('data', chunk => {
-      body += chunk;
-      if (body.length > 10_000) reject(Object.assign(new Error('Request too large'), { status: 413 }));
+      size += chunk.length;
+      if (size <= MAX_BODY_BYTES) return chunks.push(chunk);
+      req.removeAllListeners('data');
+      req.pause();
+      tooLarge();
     });
     req.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch { reject(Object.assign(new Error('Invalid JSON'), { status: 400 })); }
+      const text = Buffer.concat(chunks).toString('utf8');
+      let value;
+      try { value = text ? JSON.parse(text) : {}; } catch { return invalid(); }
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid();
+      resolve(value);
     });
     req.on('error', reject);
   });
 }
+
+// The organiser is whoever signed up first.
+const organiserId = () => db.prepare('SELECT MIN(id) AS id FROM members').get().id;
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
@@ -213,13 +321,23 @@ async function handleApi(req, res, me) {
     const name = String(body.name ?? '').trim();
     const username = String(body.username ?? '').trim();
     const password = String(body.password ?? '');
-    // Case-insensitive so phone auto-capitalisation ("BirthdayYH") still works.
-    if (String(body.code ?? '').trim().toLowerCase() !== SIGNUP_CODE.toLowerCase()) {
+    const codeKey = `code:${clientIp(req)}`;
+    const wait = retryAfterSeconds(codeKey);
+    if (wait) return tooManyAttempts(res, wait);
+    if (!safeEqual(String(body.code ?? '').trim(), SIGNUP_CODE)) {
+      recordFailure(codeKey);
       return sendJson(res, 403, { error: 'Wrong sign-up code.' });
     }
     if (!name || name.length > 40) return sendJson(res, 400, { error: 'Your name is required (max 40 characters).' });
     if (!/^[A-Za-z0-9_.-]{3,30}$/.test(username)) return sendJson(res, 400, { error: 'Username: 3–30 letters, numbers, . _ or -' });
-    if (password.length < 6) return sendJson(res, 400, { error: 'Password must be at least 6 characters.' });
+    if (password.length < MIN_PASSWORD_LENGTH || password.length > 200) {
+      return sendJson(res, 400, { error: `Password must be ${MIN_PASSWORD_LENGTH}–200 characters.` });
+    }
+    if (password.toLowerCase() === username.toLowerCase()) {
+      return sendJson(res, 400, { error: 'Password can’t be the same as your username.' });
+    }
+    // Hash first, then check and insert with no await in between so two sign-ups can't race past the limit.
+    const passwordHash = await hashPassword(password);
     if (db.prepare('SELECT COUNT(*) AS n FROM members').get().n >= MAX_MEMBERS) {
       return sendJson(res, 403, { error: `Sign-up is full (${MAX_MEMBERS} family members max).` });
     }
@@ -227,32 +345,57 @@ async function handleApi(req, res, me) {
       return sendJson(res, 409, { error: 'That username is taken.' });
     }
     const { lastInsertRowid } = db.prepare('INSERT INTO members (name, username, password_hash) VALUES (?, ?, ?)')
-      .run(name, username, hashPassword(password));
-    createSession(res, Number(lastInsertRowid));
+      .run(name, username, passwordHash);
+    createSession(req, res, Number(lastInsertRowid));
     return sendJson(res, 201, { ok: true });
   }
 
   if (method === 'POST' && url === '/api/login') {
     const body = await readJson(req);
-    const row = db.prepare('SELECT id, password_hash FROM members WHERE username = ?').get(String(body.username ?? '').trim());
-    if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash)) {
+    const username = String(body.username ?? '').trim();
+    const keys = [`ip:${clientIp(req)}`, `user:${username.toLowerCase()}`];
+    const wait = retryAfterSeconds(...keys);
+    if (wait) return tooManyAttempts(res, wait);
+    const row = db.prepare('SELECT id, password_hash FROM members WHERE username = ?').get(username);
+    // Always run scrypt so unknown and known usernames take the same time.
+    const ok = await verifyPassword(String(body.password ?? ''), row ? row.password_hash : DUMMY_HASH);
+    if (!row || !ok) {
+      recordFailure(...keys);
       return sendJson(res, 401, { error: 'Wrong username or password.' });
     }
-    createSession(res, row.id);
+    failures.delete(keys[1]);
+    createSession(req, res, row.id);
     return sendJson(res, 200, { ok: true });
   }
 
   if (method === 'POST' && url === '/api/logout') {
     const token = getCookie(req, 'sid');
     if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-    res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+    setSessionCookie(req, res, '', 0);
     return sendJson(res, 200, { ok: true });
   }
 
   // Everything below requires login.
   if (!me) return sendJson(res, 401, { error: 'Please log in.' });
 
-  if (method === 'GET' && url === '/api/me') return sendJson(res, 200, me);
+  if (method === 'GET' && url === '/api/me') return sendJson(res, 200, { ...me, isOrganiser: me.id === organiserId() });
+
+  // Deleting your account removes your login, sessions and expenses (ON DELETE CASCADE).
+  // Wiping the party (organiser only) removes every member, session and expense.
+  if (method === 'DELETE' && (url === '/api/me' || url === '/api/party')) {
+    const body = await readJson(req);
+    if (url === '/api/party' && me.id !== organiserId()) {
+      return sendJson(res, 403, { error: 'Only the organiser (the first person to sign up) can wipe the party data.' });
+    }
+    const { password_hash } = db.prepare('SELECT password_hash FROM members WHERE id = ?').get(me.id);
+    if (!(await verifyPassword(String(body.password ?? ''), password_hash))) {
+      return sendJson(res, 403, { error: 'Wrong password.' });
+    }
+    if (url === '/api/me') db.prepare('DELETE FROM members WHERE id = ?').run(me.id);
+    else db.exec('BEGIN; DELETE FROM expenses; DELETE FROM sessions; DELETE FROM members; COMMIT;');
+    setSessionCookie(req, res, '', 0);
+    return sendJson(res, 200, { ok: true });
+  }
 
   // What to share with family members who haven't signed up yet.
   if (method === 'GET' && url === '/api/invite') return sendJson(res, 200, { code: SIGNUP_CODE, lanUrl: LAN_URL });
@@ -300,19 +443,34 @@ async function handleApi(req, res, me) {
 
 // ---------- Server ----------
 
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+};
+
 const server = http.createServer(async (req, res) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
   try {
     if (req.url.startsWith('/api/')) return await handleApi(req, res, currentMember(req));
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' });
     serveStatic(req, res);
   } catch (err) {
     if (!err.status) console.error(err);
+    if (err.status === 413) {
+      // Don't read the rest of an oversized upload; close the connection once the reply is sent.
+      res.setHeader('Connection', 'close');
+      res.on('finish', () => req.destroy());
+    }
     if (!res.headersSent) sendJson(res, err.status || 500, { error: err.status ? err.message : 'Something went wrong.' });
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, HOST, () => {
   console.log(`🎂 Birthday Expense Calculator running at http://localhost:${PORT}`);
-  if (LAN_URL) console.log(`   Family on the same Wi-Fi can open ${LAN_URL}`);
-  console.log(`   Sign-up code: ${SIGNUP_CODE}`);
+  if (LAN_URL) console.log(`   Family on the same Wi-Fi can open ${LAN_URL} (plain HTTP — use only on a trusted network)`);
+  else if (isLoopbackHost) console.log('   Only this computer can connect. Set HOST=0.0.0.0 to allow phones on the same Wi-Fi.');
+  // Printed once, when the code is first generated. After that, logged-in members see it in the app.
+  if (signupCodeIsNew) console.log(`   Sign-up code (generated, shown only this once): ${SIGNUP_CODE}`);
 });
