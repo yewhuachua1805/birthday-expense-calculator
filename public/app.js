@@ -138,7 +138,10 @@ function renderSummary(s) {
   lastSummary = s;
   const provisional = s.memberCount < s.maxMembers;
   $('#stat-total').textContent = money(s.totalCents);
-  $('#stat-share').textContent = money(Math.round(s.perPersonCents));
+  // Matches the Share column: some people pay 1¢ more when the total doesn't divide evenly.
+  $('#stat-share').textContent = s.shareRemainderCents
+    ? `${money(s.perPersonCents)}–${money(s.perPersonCents + 1)}`
+    : money(s.perPersonCents);
   $('#stat-share-note').hidden = !provisional;
   $('#stat-share-note').textContent = `Provisional: ${s.memberCount} of ${s.maxMembers} signed up`;
   $('#stat-members').textContent = `${s.memberCount} / ${s.maxMembers}`;
@@ -146,34 +149,42 @@ function renderSummary(s) {
     ? `Costs are split among the ${s.memberCount} people who have signed up so far. Shares will change as more people join.`
     : `Costs are split equally among all ${s.memberCount} family members.`;
 
+  // People are matched by id; repeated names are numbered ("Mum (1)", "Mum (2)") in table order.
+  const personName = id => {
+    const m = s.members.find(x => x.id === id);
+    const same = s.members.filter(x => x.name.toLowerCase() === m.name.toLowerCase());
+    return m.name + (same.length > 1 ? ` (${same.indexOf(m) + 1})` : '') + (id === me.id ? ' (you)' : '');
+  };
+
   $('#members').innerHTML = s.members.map(m => {
     const cls = m.balanceCents > 0 ? 'pos' : m.balanceCents < 0 ? 'neg' : '';
     const label = m.balanceCents > 0 ? `gets back ${money(m.balanceCents)}`
                 : m.balanceCents < 0 ? `owes ${money(-m.balanceCents)}` : 'settled';
     return `<tr class="${m.id === me.id ? 'me' : ''}">
-      <td>${escapeHtml(m.name)}${m.id === me.id ? ' (you)' : ''}</td>
+      <td>${escapeHtml(personName(m.id))}</td>
       <td class="num">${money(m.paidCents)}</td>
       <td class="num">${money(m.shareCents)}</td>
       <td class="num ${cls}">${label}</td>
     </tr>`;
   }).join('');
 
-  // Settlements only carry names, so match the current user by name.
-  const isMe = name => name === me.name;
-  const who = name => isMe(name) ? 'You' : escapeHtml(name);
-  const mine = s.settlements.filter(t => isMe(t.from) || isMe(t.to));
+  // Settlements carry member ids, so people who share a name are still told apart.
+  const isMe = id => id === me.id;
+  const name = id => escapeHtml(personName(id));
+  const mine = s.settlements.filter(t => isMe(t.fromId) || isMe(t.toId));
   $('#my-settlements').hidden = !s.settlements.length;
   $('#my-settlements').innerHTML = mine.length
-    ? '<strong>Your payments:</strong> ' + mine.map(t => isMe(t.from)
-        ? `You pay ${escapeHtml(t.to)} ${money(t.amountCents)}`
-        : `${escapeHtml(t.from)} pays you ${money(t.amountCents)}`).join('; ')
+    ? '<strong>Your payments:</strong> ' + mine.map(t => isMe(t.fromId)
+        ? `You pay ${name(t.toId)} ${money(t.amountCents)}`
+        : `${name(t.fromId)} pays you ${money(t.amountCents)}`).join('; ')
     : '<strong>Your payments:</strong> nothing for you to pay or receive.';
 
   $('#settlements').innerHTML = s.settlements.length
     ? s.settlements.map(t => {
-        const pays = isMe(t.from) ? 'pay' : 'pays';
-        const to = isMe(t.to) ? 'you' : escapeHtml(t.to);
-        return `<li class="${isMe(t.from) || isMe(t.to) ? 'mine' : ''}"><strong>${who(t.from)}</strong> ${pays} <strong>${to}</strong> <span class="amt">${money(t.amountCents)}</span></li>`;
+        const from = isMe(t.fromId) ? 'You' : name(t.fromId);
+        const pays = isMe(t.fromId) ? 'pay' : 'pays';
+        const to = isMe(t.toId) ? 'you' : name(t.toId);
+        return `<li class="${isMe(t.fromId) || isMe(t.toId) ? 'mine' : ''}"><strong>${from}</strong> ${pays} <strong>${to}</strong> <span class="amt">${money(t.amountCents)}</span></li>`;
       }).join('')
     : `<li class="muted">${s.totalCents ? 'Everyone is even 🎉' : 'Nothing to settle yet.'}</li>`;
 }
@@ -205,10 +216,11 @@ const FIELD_ERRORS = { description: '#description-error', amount: '#amount-error
 
 // Mirrors the server: "100", "45.50", "$1,250.00" are fine; at most 2 decimals, above zero.
 function amountError(value) {
-  const text = value.trim().replace(/^\$/, '').replace(/,/g, '');
+  const text = value.trim().replace(/^\$/, '');
   if (!text) return 'Enter an amount.';
-  if (!/^\d+(\.\d{1,2})?$/.test(text)) return 'Use numbers only, with up to 2 decimals — e.g. 45 or 45.50.';
-  const cents = Math.round(parseFloat(text) * 100);
+  // Same rule as the server: commas only as thousands separators, so "1,00" isn't read as 100.
+  if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(text)) return 'Use numbers only, with up to 2 decimals — e.g. 45 or 45.50.';
+  const cents = Math.round(parseFloat(text.replace(/,/g, '')) * 100);
   if (cents <= 0) return 'The amount must be more than zero.';
   if (cents > 100_000_000) return `The amount must be at most ${money(100_000_000)}.`;
   return '';
@@ -290,6 +302,9 @@ tabs.forEach((tab, i) => {
 for (const [formId, endpoint] of [['#login-form', '/api/login'], ['#register-form', '/api/register']]) {
   $(formId).addEventListener('submit', async e => {
     e.preventDefault();
+    const button = e.target.querySelector('[type=submit]');
+    if (button.disabled) return; // a request is already in flight
+    button.disabled = true;
     $('#auth-error').textContent = '';
     try {
       await api(endpoint, { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
@@ -298,6 +313,8 @@ for (const [formId, endpoint] of [['#login-form', '/api/login'], ['#register-for
       showApp({ focus: true });
     } catch (err) {
       $('#auth-error').textContent = err.message;
+    } finally {
+      button.disabled = false;
     }
   });
 }
@@ -333,8 +350,11 @@ for (const name of Object.keys(FIELD_ERRORS)) {
 
 $('#expense-form').addEventListener('submit', async e => {
   e.preventDefault();
+  const button = $('#form-submit');
+  if (button.disabled) return; // a save is already in flight; don't create a duplicate expense
   $('#form-error').textContent = '';
   if (!validateExpenseForm()) return;
+  button.disabled = true;
   const body = Object.fromEntries(new FormData(e.target));
   const wasEditing = editingId;
   try {
@@ -347,6 +367,8 @@ $('#expense-form').addEventListener('submit', async e => {
   } catch (err) {
     if (err.status === 401) return showAuth();
     $('#form-error').textContent = err.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -379,10 +401,11 @@ $('#expenses').addEventListener('click', async e => {
     form.description.focus();
   }
 
-  if (deleteId) {
+  if (deleteId && !button.disabled) {
     const exp = expenseCache.find(x => x.id === Number(deleteId));
     if (!confirm(`Delete “${exp.description}” (${money(exp.amountCents)}, ${formatDate(exp.spentOn)})?\n\nThis can’t be undone.`)) return;
     $('#expenses-error').textContent = '';
+    button.disabled = true; // a delete is in flight
     try {
       await api(`/api/expenses/${deleteId}`, { method: 'DELETE' });
       if (editingId === Number(deleteId)) resetForm();
@@ -392,8 +415,38 @@ $('#expenses').addEventListener('click', async e => {
     } catch (err) {
       if (err.status === 401) return showAuth();
       $('#expenses-error').textContent = `Couldn’t delete “${exp.description}”. ${err.message}`;
+    } finally {
+      button.disabled = false;
     }
   }
 });
+
+// ---------- Delete account / wipe party data ----------
+
+$('#delete-data-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#delete-data-error').textContent = '';
+  const target = e.submitter?.dataset.target || '/api/me';
+  const question = target === '/api/party'
+    ? 'Delete EVERY member’s account and ALL expenses? Everyone will need to sign up again.'
+    : 'Delete your account and all the expenses you added?';
+  if (!confirm(question)) return;
+  try {
+    await api(target, { method: 'DELETE', body: Object.fromEntries(new FormData(e.target)) });
+    e.target.reset();
+    me = null;
+    showAuth();
+  } catch (err) {
+    if (err.status === 401) return showAuth();
+    $('#delete-data-error').textContent = err.message;
+  }
+});
+
+// Only the organiser sees the wipe button. Checked whenever the main view is shown.
+new MutationObserver(() => {
+  const organiser = Boolean(me?.isOrganiser) && !$('#app-view').hidden;
+  $('#wipe-party-btn').hidden = !organiser;
+  $('#wipe-party-note').hidden = !organiser;
+}).observe($('#app-view'), { attributes: true, attributeFilter: ['hidden'] });
 
 boot();

@@ -37,7 +37,7 @@
       <form id="register-form" class="stack" role="tabpanel" aria-labelledby="tab-register" hidden>
         <label>Your name <input name="name" placeholder="e.g. Auntie May" maxlength="40" required></label>
         <label>Username <input name="username" autocomplete="username" autocapitalize="off" pattern="[A-Za-z0-9_.\-]{3,30}" title="3–30 letters, numbers, . _ or -" required></label>
-        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="6" required></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
         <label>Sign-up code <input name="code" autocapitalize="off" autocomplete="off" placeholder="From the family message" required></label>
         <button class="primary" type="submit">Create account</button>
       </form>
@@ -146,6 +146,23 @@
           </table>
         </div>
         <p id="no-expenses" class="muted empty" hidden>No expenses yet. Add the first one above.</p>
+      </section>
+
+      <section class="card">
+        <h2>Your data</h2>
+        <p class="muted small">
+          Deleting your account removes your name, login and every expense you added.
+          <span id="wipe-party-note" hidden>As the organiser, you can also wipe everyone's accounts and expenses once the party is settled.</span>
+          This can't be undone.
+        </p>
+        <form id="delete-data-form" class="stack">
+          <label>Confirm your password <input name="password" type="password" autocomplete="current-password" required></label>
+          <div class="row">
+            <button class="ghost" type="submit" data-target="/api/me">Delete my account</button>
+            <button class="ghost" type="submit" data-target="/api/party" id="wipe-party-btn" hidden>Wipe all party data</button>
+          </div>
+          <p id="delete-data-error" class="error" role="alert"></p>
+        </form>
       </section>
     </main>
   </div>
