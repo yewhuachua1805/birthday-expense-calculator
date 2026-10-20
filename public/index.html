@@ -8,24 +8,33 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <!-- Shown until we know whether the user is logged in -->
+  <main id="loading-view" class="auth">
+    <div class="card auth-card loading-card">
+      <h1>🎂 Party Expenses</h1>
+      <p id="loading-message" class="muted" role="status">Loading…</p>
+      <button id="boot-retry" class="primary" type="button" hidden>Try again</button>
+    </div>
+  </main>
+
   <!-- Login / sign-up -->
   <main id="auth-view" class="auth" hidden>
     <div class="card auth-card">
-      <h1>🎂 Party Expenses</h1>
+      <h1 id="auth-heading" tabindex="-1">🎂 Party Expenses</h1>
       <p class="muted">Track who paid for what at the birthday party, and settle up fairly.</p>
 
-      <div class="tabs" role="tablist">
-        <button type="button" class="tab active" data-tab="login" role="tab">Log in</button>
-        <button type="button" class="tab" data-tab="register" role="tab">Sign up</button>
+      <div class="tabs" role="tablist" aria-label="Log in or sign up">
+        <button type="button" class="tab active" id="tab-login" data-tab="login" role="tab" aria-selected="true" aria-controls="login-form">Log in</button>
+        <button type="button" class="tab" id="tab-register" data-tab="register" role="tab" aria-selected="false" aria-controls="register-form" tabindex="-1">Sign up</button>
       </div>
 
-      <form id="login-form" class="stack">
+      <form id="login-form" class="stack" role="tabpanel" aria-labelledby="tab-login">
         <label>Username <input name="username" autocomplete="username" autocapitalize="off" required></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
         <button class="primary" type="submit">Log in</button>
       </form>
 
-      <form id="register-form" class="stack" hidden>
+      <form id="register-form" class="stack" role="tabpanel" aria-labelledby="tab-register" hidden>
         <label>Your name <input name="name" placeholder="e.g. Auntie May" maxlength="40" required></label>
         <label>Username <input name="username" autocomplete="username" autocapitalize="off" pattern="[A-Za-z0-9_.\-]{3,30}" title="3–30 letters, numbers, . _ or -" required></label>
         <label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
@@ -40,7 +49,7 @@
   <!-- Main app -->
   <div id="app-view" hidden>
     <header class="topbar">
-      <h1>🎂 Party Expenses</h1>
+      <h1 id="app-heading" tabindex="-1">🎂 Party Expenses</h1>
       <div class="user">
         <span id="whoami"></span>
         <button id="logout-btn" type="button" class="ghost">Log out</button>
@@ -48,10 +57,19 @@
     </header>
 
     <main class="container">
+      <div id="load-error" class="banner" role="alert" hidden>
+        <span id="load-error-message"></span>
+        <button id="retry-btn" type="button" class="ghost">Retry</button>
+      </div>
+      <p id="live-status" class="sr-only" role="status"></p>
+
       <section class="stats">
-        <div class="card stat"><span class="label">Total spent</span><span id="stat-total" class="value">$0.00</span></div>
-        <div class="card stat"><span class="label">Each person's share</span><span id="stat-share" class="value">$0.00</span></div>
-        <div class="card stat"><span class="label">Signed up</span><span id="stat-members" class="value">0 / 10</span></div>
+        <div class="card stat"><span class="label">Total spent</span><span id="stat-total" class="value">–</span></div>
+        <div class="card stat">
+          <span class="label">Each person's share</span><span id="stat-share" class="value">–</span>
+          <span id="stat-share-note" class="tiny provisional" hidden></span>
+        </div>
+        <div class="card stat"><span class="label">Signed up</span><span id="stat-members" class="value">–</span></div>
       </section>
 
       <section id="invite-card" class="card" hidden>
@@ -71,11 +89,25 @@
       <div class="grid">
         <section class="card">
           <h2 id="form-title">Add an expense</h2>
-          <form id="expense-form" class="stack">
-            <label>What was it for? <input name="description" placeholder="e.g. Birthday cake" maxlength="100" required></label>
+          <p id="editing-note" class="editing-note" hidden></p>
+          <form id="expense-form" class="stack" novalidate>
+            <div class="field">
+              <label for="exp-description">What was it for?</label>
+              <input id="exp-description" name="description" placeholder="e.g. Birthday cake" maxlength="100" required aria-describedby="description-error">
+              <span id="description-error" class="field-error"></span>
+            </div>
             <div class="row">
-              <label>Amount ($) <input name="amount" inputmode="decimal" placeholder="100.00" required></label>
-              <label>Date <input name="spentOn" type="date" required></label>
+              <div class="field">
+                <label for="exp-amount">Amount (<span class="currency-code">USD</span>)</label>
+                <input id="exp-amount" name="amount" inputmode="decimal" placeholder="100.00" required aria-describedby="amount-hint amount-error">
+                <span id="amount-hint" class="hint">e.g. 45 or 45.50</span>
+                <span id="amount-error" class="field-error"></span>
+              </div>
+              <div class="field">
+                <label for="exp-date">Date</label>
+                <input id="exp-date" name="spentOn" type="date" required aria-describedby="date-error">
+                <span id="date-error" class="field-error"></span>
+              </div>
             </div>
             <div class="row">
               <button class="primary" type="submit" id="form-submit">Add expense</button>
@@ -88,6 +120,7 @@
         <section class="card">
           <h2>Settle up</h2>
           <p class="muted small">The fewest payments needed so everyone has paid an equal share.</p>
+          <p id="my-settlements" class="notice mine" hidden></p>
           <ul id="settlements" class="settlements"></ul>
         </section>
       </div>
@@ -104,10 +137,11 @@
       </section>
 
       <section class="card">
-        <h2>All expenses</h2>
+        <h2 id="expenses-heading" tabindex="-1">All expenses</h2>
+        <p id="expenses-error" class="error" role="alert"></p>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Date</th><th>Item</th><th>Paid by</th><th class="num">Amount</th><th></th></tr></thead>
+          <table class="expenses-table">
+            <thead><tr><th>Date</th><th>Item</th><th>Paid by</th><th class="num">Amount</th><th><span class="sr-only">Actions</span></th></tr></thead>
             <tbody id="expenses"></tbody>
           </table>
         </div>

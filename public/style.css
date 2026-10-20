@@ -2,11 +2,13 @@
   --bg: #fdf7f2;
   --card: #ffffff;
   --text: #2b2330;
-  --muted: #7a6f80;
+  --muted: #6b6070;
   --border: #eadfe6;
+  --border-strong: #958a9a; /* ≥3:1 on white, for input and button outlines */
   --accent: #d6457a;
   --accent-dark: #b4335f;
-  --pos: #1f8a4c;
+  --accent-darker: #962a50;
+  --pos: #17703d;
   --neg: #c0392b;
   --radius: 14px;
 }
@@ -48,10 +50,11 @@ label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; font
 input {
   font: inherit;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   background: #fff;
 }
+input[aria-invalid="true"] { border-color: var(--neg); border-width: 2px; }
 input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
 
 button {
@@ -61,11 +64,12 @@ button {
   padding: 10px 16px;
   border: 1px solid transparent;
 }
-button.primary { background: var(--accent); color: #fff; font-weight: 600; }
-button.primary:hover { background: var(--accent-dark); }
-button.ghost { background: transparent; border-color: var(--border); color: var(--text); }
+button.primary { background: var(--accent-dark); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--accent-darker); }
+button:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 2px; }
+button.ghost { background: transparent; border-color: var(--border-strong); color: var(--text); }
 button.ghost:hover { background: var(--bg); }
-button.link { background: none; border: none; padding: 4px 6px; color: var(--accent); font-size: 0.85rem; }
+button.link { background: none; border: none; padding: 4px 10px; min-height: 32px; color: var(--accent-dark); font-size: 0.85rem; text-decoration: underline; }
 button.link.danger { color: var(--neg); }
 
 /* Auth */
@@ -111,6 +115,28 @@ button.link.danger { color: var(--neg); }
 .tiny { font-size: 0.8rem; font-weight: 400; }
 .small-note { font-size: 0.85rem; margin: 0; text-align: center; }
 
+/* Field hints and errors */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > label { display: block; font-size: 0.9rem; font-weight: 500; }
+.row > .field { flex: 1 1 140px; }
+.hint { font-size: 0.8rem; color: var(--muted); }
+.field-error { font-size: 0.85rem; color: var(--neg); }
+.field-error:empty { display: none; }
+.editing-note { margin: -4px 0 12px; padding: 8px 12px; border-radius: 10px; background: #fdeef4; font-size: 0.9rem; overflow-wrap: anywhere; }
+
+/* Loading, errors and status */
+.loading-card { text-align: center; }
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px; border-radius: var(--radius); background: #fdecea; color: #8e2a1f; border: 1px solid #e6a59d;
+}
+#expenses-error:empty { min-height: 0; margin: 0; }
+.provisional { color: #8a5300; margin-top: 2px; }
+.settlements li.mine { background: #fdeef4; border-left: 4px solid var(--accent-dark); }
+.notice.mine { background: #fdeef4; color: var(--text); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
+
 /* Tables */
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
@@ -121,12 +147,28 @@ td.desc { white-space: normal; }
 .pos { color: var(--pos); font-weight: 600; }
 .neg { color: var(--neg); font-weight: 600; }
 tr.me td:first-child { font-weight: 600; }
+tr.editing td { background: #fdeef4; }
+td.actions button + button { margin-left: 6px; }
 .empty { text-align: center; padding: 16px 0 0; }
 
 @media (max-width: 700px) {
   .stats { grid-template-columns: 1fr; }
   .grid { grid-template-columns: 1fr; }
   .stat .value { font-size: 1.3rem; }
-  #whoami { display: none; }
+  .topbar { padding: 10px 12px; }
+  .topbar h1 { font-size: 1.05rem; white-space: nowrap; }
+  #whoami { max-width: 38vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #whoami .hi { display: none; }
+  #logout-btn { white-space: nowrap; padding: 8px 12px; }
+
+  /* Expenses become stacked cards so Edit/Delete are big, spaced and need no sideways scrolling. */
+  .expenses-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .expenses-table tr { display: block; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .expenses-table td { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border: none; white-space: normal; text-align: right; }
+  .expenses-table td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: 0.85rem; text-align: left; }
+  .expenses-table td.actions { gap: 12px; padding-top: 8px; }
+  .expenses-table td.actions:not(:has(button)) { display: none; }
+  .expenses-table td.actions button { flex: 1; min-height: 44px; border: 1px solid var(--border-strong); border-radius: 10px; font-size: 0.95rem; text-decoration: none; }
+  .expenses-table td.actions button.danger { border-color: var(--neg); }
   .invite-details { grid-template-columns: 1fr; }
 }
