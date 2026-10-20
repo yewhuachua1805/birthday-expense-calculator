@@ -1,0 +1,13 @@
+{
+  "name": "birthday-expense-calculator",
+  "version": "1.0.0",
+  "description": "Birthday party expense calculator for up to 10 family members",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

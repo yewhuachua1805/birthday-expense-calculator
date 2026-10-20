@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Party Expenses</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎂</text></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Login / sign-up -->
+  <main id="auth-view" class="auth" hidden>
+    <div class="card auth-card">
+      <h1>🎂 Party Expenses</h1>
+      <p class="muted">Track who paid for what at the birthday party, and settle up fairly.</p>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="login" role="tab">Log in</button>
+        <button type="button" class="tab" data-tab="register" role="tab">Sign up</button>
+      </div>
+
+      <form id="login-form" class="stack">
+        <label>Username <input name="username" autocomplete="username" autocapitalize="off" required></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">Log in</button>
+      </form>
+
+      <form id="register-form" class="stack" hidden>
+        <label>Your name <input name="name" placeholder="e.g. Auntie May" maxlength="40" required></label>
+        <label>Username <input name="username" autocomplete="username" autocapitalize="off" pattern="[A-Za-z0-9_.\-]{3,30}" title="3–30 letters, numbers, . _ or -" required></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="6" required></label>
+        <label>Sign-up code <input name="code" autocapitalize="off" autocomplete="off" placeholder="From the family message" required></label>
+        <button class="primary" type="submit">Create account</button>
+      </form>
+
+      <p id="auth-error" class="error" role="alert"></p>
+    </div>
+  </main>
+
+  <!-- Main app -->
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <h1>🎂 Party Expenses</h1>
+      <div class="user">
+        <span id="whoami"></span>
+        <button id="logout-btn" type="button" class="ghost">Log out</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="stats">
+        <div class="card stat"><span class="label">Total spent</span><span id="stat-total" class="value">$0.00</span></div>
+        <div class="card stat"><span class="label">Each person's share</span><span id="stat-share" class="value">$0.00</span></div>
+        <div class="card stat"><span class="label">Signed up</span><span id="stat-members" class="value">0 / 10</span></div>
+      </section>
+
+      <section id="invite-card" class="card" hidden>
+        <h2>Get everyone signed up</h2>
+        <p id="invite-status" class="notice warn"></p>
+        <div class="invite-details">
+          <div><span class="label">Link</span><code id="invite-link"></code></div>
+          <div><span class="label">Sign-up code</span><code id="invite-code"></code></div>
+        </div>
+        <p id="invite-localhost-note" class="muted small-note" hidden>
+          This link only works for phones and computers on the same Wi-Fi as the computer running the app.
+        </p>
+        <button id="copy-invite" class="primary" type="button">Copy invite message</button>
+        <span id="copy-status" class="muted tiny" role="status"></span>
+      </section>
+
+      <div class="grid">
+        <section class="card">
+          <h2 id="form-title">Add an expense</h2>
+          <form id="expense-form" class="stack">
+            <label>What was it for? <input name="description" placeholder="e.g. Birthday cake" maxlength="100" required></label>
+            <div class="row">
+              <label>Amount ($) <input name="amount" inputmode="decimal" placeholder="100.00" required></label>
+              <label>Date <input name="spentOn" type="date" required></label>
+            </div>
+            <div class="row">
+              <button class="primary" type="submit" id="form-submit">Add expense</button>
+              <button class="ghost" type="button" id="form-cancel" hidden>Cancel</button>
+            </div>
+            <p id="form-error" class="error" role="alert"></p>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Settle up</h2>
+          <p class="muted small">The fewest payments needed so everyone has paid an equal share.</p>
+          <ul id="settlements" class="settlements"></ul>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Who paid what</h2>
+        <p id="split-note" class="muted small"></p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Member</th><th class="num">Paid</th><th class="num">Share</th><th class="num">Balance</th></tr></thead>
+            <tbody id="members"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>All expenses</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Item</th><th>Paid by</th><th class="num">Amount</th><th></th></tr></thead>
+            <tbody id="expenses"></tbody>
+          </table>
+        </div>
+        <p id="no-expenses" class="muted empty" hidden>No expenses yet. Add the first one above.</p>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
